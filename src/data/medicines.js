@@ -1,0 +1,48 @@
+// src/data/medicines.js
+
+export const MEDICINES = [
+  {
+    id: "nebilet-5",
+    name: "Nebilet",
+    substance: "Nebivolol",
+    strength: "5 mg",
+    form: "Tablet",
+    packSize: "30 tablets",
+    stock: 18,
+    city: "Bucharest",
+    pharmacyName: "Sensiblu Unirii",
+  },
+  {
+    id: "enalapril-10",
+    name: "Enalapril",
+    substance: "Enalapril maleate",
+    strength: "10 mg",
+    form: "Tablet",
+    packSize: "30 tablets",
+    stock: 4,
+    city: "Bucharest",
+    pharmacyName: "Help Net Tineretului",
+  },
+  {
+    id: "metformin-850",
+    name: "Metformin",
+    substance: "Metformin hydrochloride",
+    strength: "850 mg",
+    form: "Tablet",
+    packSize: "60 tablets",
+    stock: 0,
+    city: "Cluj-Napoca",
+    pharmacyName: "Catena Zorilor",
+  },
+  {
+    id: "ibuprofen-400",
+    name: "Ibuprofen",
+    substance: "Ibuprofen",
+    strength: "400 mg",
+    form: "Tablet",
+    packSize: "20 tablets",
+    stock: 32,
+    city: "Bucharest",
+    pharmacyName: "Dr. Max Militari",
+  },
+];
