@@ -1,10 +1,10 @@
-// src/pages/pharmacy/SmartOrder.jsx
-import { useEffect, useState } from "react";
+// src/pages/pharmacy/SmartOrderView.jsx
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../supabaseClient";
 import MedicineList from "./MedicineList.jsx";
 import AddBatchModal from "./AddBatchModal.jsx";
 
-function PharmacySmartOrder() {
+export default function SmartOrderView() {
   const [query, setQuery] = useState("");
   const [medicines, setMedicines] = useState([]);
   const [batches, setBatches] = useState([]);
@@ -20,7 +20,9 @@ function PharmacySmartOrder() {
 
   // ---------- FETCH ----------
   useEffect(() => {
-    async function fetchAll() {
+    let alive = true;
+
+    (async () => {
       setLoading(true);
       setError(null);
 
@@ -28,19 +30,19 @@ function PharmacySmartOrder() {
         { data: meds, error: medsError },
         { data: batchData, error: batchError },
       ] = await Promise.all([
-        supabase.from("pharmacy").select("*"),
-        supabase.from("batches").select("*"),
+        supabase.from("pharmacy").select("id,name,substance,strength,form,stock"),
+        supabase.from("batches").select("id,medicine_id,quantity,expiry_date"),
       ]);
 
+      if (!alive) return;
+
       if (medsError) {
-        console.error("Error loading medicines:", medsError);
         setError(medsError.message);
         setLoading(false);
         return;
       }
 
       if (batchError) {
-        console.error("Error loading batches:", batchError);
         setError(batchError.message);
         setLoading(false);
         return;
@@ -49,34 +51,48 @@ function PharmacySmartOrder() {
       setMedicines(meds || []);
       setBatches(batchData || []);
       setLoading(false);
-    }
+    })();
 
-    fetchAll();
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  // ---------- HELPERS ----------
+  // ---------- PRECOMPUTE: stock + soonest expiry ----------
+  const stockByMedicineId = useMemo(() => {
+    const map = new Map();
+    for (const b of batches) {
+      const id = String(b.medicine_id);
+      const qty = Number(b.quantity || 0);
+      map.set(id, (map.get(id) || 0) + qty);
+    }
+    return map;
+  }, [batches]);
+
+  const soonestExpiryByMedicineId = useMemo(() => {
+    const map = new Map();
+    for (const b of batches) {
+      if (!b.expiry_date) continue;
+      const id = String(b.medicine_id);
+      const exp = new Date(b.expiry_date).getTime();
+      const cur = map.get(id);
+      if (cur == null || exp < cur) map.set(id, exp);
+    }
+    return map;
+  }, [batches]);
+
   function getTotalStock(medicineId) {
-    const totalFromBatches = batches
-      .filter((b) => b.medicine_id === medicineId)
-      .reduce((sum, b) => sum + (b.quantity || 0), 0);
+    const fromBatches = stockByMedicineId.get(String(medicineId)) || 0;
+    if (fromBatches > 0) return fromBatches;
 
-    if (totalFromBatches > 0) return totalFromBatches;
-
-    const med = medicines.find((m) => m.id === medicineId);
-    return med?.stock ?? 0;
+    // fallback if you still keep a stock column (optional)
+    const med = medicines.find((m) => String(m.id) === String(medicineId));
+    return Number(med?.stock || 0);
   }
 
   function getSoonestExpiry(medicineId) {
-    const medBatches = batches.filter((b) => b.medicine_id === medicineId);
-    if (medBatches.length === 0) return null;
-
-    const sorted = [...medBatches].sort((a, b) => {
-      if (!a.expiry_date) return 1;
-      if (!b.expiry_date) return -1;
-      return new Date(a.expiry_date) - new Date(b.expiry_date);
-    });
-
-    return sorted[0].expiry_date || null;
+    const ms = soonestExpiryByMedicineId.get(String(medicineId));
+    return ms ? new Date(ms).toISOString().slice(0, 10) : null; // "YYYY-MM-DD"
   }
 
   function isNearExpiry(expiryDate) {
@@ -88,51 +104,52 @@ function PharmacySmartOrder() {
     return diffDays <= NEAR_EXPIRY_DAYS;
   }
 
-  // ---------- CLASSIFY + FILTER ----------
-  const riskyMeds = medicines.filter((med) => {
-    const totalStock = getTotalStock(med.id);
-    const soonest = getSoonestExpiry(med.id);
+  // ---------- CLASSIFY + FILTER + SORT ----------
+  const sorted = useMemo(() => {
+    const risky = medicines.filter((med) => {
+      const totalStock = getTotalStock(med.id);
+      const soonest = getSoonestExpiry(med.id);
 
-    const outOfStock = totalStock === 0;
-    const lowStock = totalStock > 0 && totalStock <= LOW_STOCK_LIMIT;
-    const nearExp = soonest && isNearExpiry(soonest);
+      const outOfStock = totalStock === 0;
+      const lowStock = totalStock > 0 && totalStock <= LOW_STOCK_LIMIT;
+      const nearExp = soonest && isNearExpiry(soonest);
 
-    return outOfStock || lowStock || nearExp;
-  });
+      return outOfStock || lowStock || nearExp;
+    });
 
-  const filtered = riskyMeds.filter((med) => {
     const q = query.toLowerCase().trim();
-    if (!q) return true;
 
-    return (
-      med.name.toLowerCase().includes(q) ||
-      med.substance.toLowerCase().includes(q)
-    );
-  });
+    const filtered = risky.filter((med) => {
+      if (!q) return true;
+      const name = String(med.name || "").toLowerCase();
+      const substance = String(med.substance || "").toLowerCase();
+      return name.includes(q) || substance.includes(q);
+    });
 
-  const sorted = [...filtered].sort((a, b) => {
-    const aStock = getTotalStock(a.id);
-    const bStock = getTotalStock(b.id);
+    return [...filtered].sort((a, b) => {
+      const aStock = getTotalStock(a.id);
+      const bStock = getTotalStock(b.id);
 
-    const aOut = aStock === 0;
-    const bOut = bStock === 0;
-    if (aOut && !bOut) return -1;
-    if (bOut && !aOut) return 1;
+      const aOut = aStock === 0;
+      const bOut = bStock === 0;
+      if (aOut && !bOut) return -1;
+      if (bOut && !aOut) return 1;
 
-    const aLow = aStock > 0 && aStock <= LOW_STOCK_LIMIT;
-    const bLow = bStock > 0 && bStock <= LOW_STOCK_LIMIT;
-    if (aLow && !bLow) return -1;
-    if (bLow && !aLow) return 1;
+      const aLow = aStock > 0 && aStock <= LOW_STOCK_LIMIT;
+      const bLow = bStock > 0 && bStock <= LOW_STOCK_LIMIT;
+      if (aLow && !bLow) return -1;
+      if (bLow && !aLow) return 1;
 
-    const aExp = getSoonestExpiry(a.id);
-    const bExp = getSoonestExpiry(b.id);
+      const aExp = getSoonestExpiry(a.id);
+      const bExp = getSoonestExpiry(b.id);
 
-    if (!aExp && !bExp) return 0;
-    if (!aExp) return 1;
-    if (!bExp) return -1;
+      if (!aExp && !bExp) return 0;
+      if (!aExp) return 1;
+      if (!bExp) return -1;
 
-    return new Date(aExp) - new Date(bExp);
-  });
+      return new Date(aExp) - new Date(bExp);
+    });
+  }, [medicines, batches, query]); // batches changes affect stock/expiry
 
   // ---------- BATCH HANDLERS ----------
   function handleAddBatchClick(med) {
@@ -242,8 +259,8 @@ function PharmacySmartOrder() {
               >
                 This view only shows medicines that are{" "}
                 <strong>out of stock</strong>, <strong>low stock</strong>, or
-                have <strong>batches expiring in the next 30 days</strong>.
-                It’s designed for refill decisions, not daily browsing.
+                have <strong>batches expiring in the next 30 days</strong>. It’s
+                designed for refill decisions, not daily browsing.
               </p>
             </header>
 
@@ -334,9 +351,7 @@ function PharmacySmartOrder() {
                 >
                   <li>Out-of-stock medicines always appear at the top.</li>
                   <li>Then low stock items (≤ 5 units).</li>
-                  <li>
-                    Then medicines with batches expiring in the next 30 days.
-                  </li>
+                  <li>Then medicines with batches expiring in the next 30 days.</li>
                 </ul>
               </div>
             </section>
@@ -373,8 +388,7 @@ function PharmacySmartOrder() {
                     color: "rgba(148,163,184,0.9)",
                   }}
                 >
-                  {sorted.length} medicine
-                  {sorted.length !== 1 ? "s" : ""} need attention
+                  {sorted.length} medicine{sorted.length !== 1 ? "s" : ""} need attention
                 </span>
               </div>
 
@@ -386,8 +400,7 @@ function PharmacySmartOrder() {
                     padding: "0.35rem 0.1rem 0.1rem",
                   }}
                 >
-                  No risky medicines right now. Stock levels and expiries look
-                  healthy.
+                  No risky medicines right now. Stock levels and expiries look healthy.
                 </p>
               ) : (
                 <MedicineList
@@ -395,8 +408,6 @@ function PharmacySmartOrder() {
                   query={query}
                   batches={batches}
                   onAddBatch={handleAddBatchClick}
-                  // Smart Order page doesn’t care about editing/deleting,
-                  // but you can expose them if you want:
                   onEdit={undefined}
                   onDelete={undefined}
                 />
@@ -419,5 +430,3 @@ function PharmacySmartOrder() {
     </>
   );
 }
-
-export default PharmacySmartOrder;

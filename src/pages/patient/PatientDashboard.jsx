@@ -1,6 +1,6 @@
 // src/pages/patient/PatientDashboard.jsx
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router-dom"; // (used in cards)
 import { listPrescriptions } from "../../data/prescriptionsApi";
 
 export default function PatientDashboard() {
@@ -10,7 +10,6 @@ export default function PatientDashboard() {
   const [lastSyncAt, setLastSyncAt] = useState(null);
   const [error, setError] = useState(null);
 
-  // Load all prescriptions on mount
   useEffect(() => {
     load();
   }, []);
@@ -28,35 +27,27 @@ export default function PatientDashboard() {
     }
   }
 
-  // Build patient list from prescriptions
   const patientOptions = useMemo(() => {
     const map = new Map(); // patientId -> patientName
     for (const p of items) {
       if (!p?.patientId) continue;
-      if (!map.has(p.patientId)) {
-        map.set(p.patientId, p.patientName || "Unknown patient");
-      }
+      if (!map.has(p.patientId)) map.set(p.patientId, p.patientName || "Unknown patient");
     }
-
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [items]);
 
-  // Selected patient name (for UI)
   const activePatientName = useMemo(() => {
     const found = patientOptions.find((x) => String(x.id) === String(patientId));
     return found?.name || "";
   }, [patientOptions, patientId]);
 
-  // Auto-pick a valid patient if current patientId is empty/invalid
   useEffect(() => {
     if (patientOptions.length === 0) return;
 
     const current = String(patientId || "");
     const exists = patientOptions.some((x) => String(x.id) === current);
 
-    if (!exists) {
-      setPatientId(patientOptions[0].id);
-    }
+    if (!exists) setPatientId(patientOptions[0].id);
   }, [patientOptions, patientId]);
 
   const patientPrescriptions = useMemo(() => {
@@ -120,20 +111,17 @@ export default function PatientDashboard() {
             "radial-gradient(circle at top left, rgba(56,189,248,0.12), transparent 55%), #020617",
           borderRadius: "1.25rem",
           border: "1px solid rgba(148,163,184,0.45)",
-          boxShadow:
-            "0 22px 70px rgba(15,23,42,0.85), 0 0 0 1px rgba(15,23,42,1)",
+          boxShadow: "0 22px 70px rgba(15,23,42,0.85), 0 0 0 1px rgba(15,23,42,1)",
           padding: "2.25rem 2.5rem 2rem",
           position: "relative",
           overflow: "hidden",
         }}
       >
-        {/* glow */}
         <div
           style={{
             position: "absolute",
             inset: 0,
-            background:
-              "radial-gradient(circle at 80% 0, rgba(59,130,246,0.14), transparent 55%)",
+            background: "radial-gradient(circle at 80% 0, rgba(59,130,246,0.14), transparent 55%)",
             opacity: 0.9,
             pointerEvents: "none",
           }}
@@ -141,36 +129,26 @@ export default function PatientDashboard() {
 
         <div style={{ position: "relative", zIndex: 1 }}>
           <header style={{ marginBottom: "1.25rem" }}>
-            <h1
-              style={{
-                fontSize: "1.7rem",
-                fontWeight: 800,
-                color: "#e5e7eb",
-                marginBottom: 6,
-              }}
-            >
+            <h1 style={{ fontSize: "1.7rem", fontWeight: 800, color: "#e5e7eb", marginBottom: 6 }}>
               Patient Dashboard
             </h1>
-            <p
-              style={{
-                marginTop: 0,
-                color: "rgba(148,163,184,0.95)",
-                maxWidth: 720,
-              }}
-            >
+
+            <p style={{ marginTop: 0, color: "rgba(148,163,184,0.95)", maxWidth: 720 }}>
               View prescriptions for the active patient. Click any card to open the details view.
             </p>
 
             <div style={{ marginTop: 8, fontSize: 12, color: "rgba(148,163,184,0.85)" }}>
-              Live sync: <strong>{lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString() : "—"}</strong>
+              Live sync:{" "}
+              <strong>{lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString() : "—"}</strong>
             </div>
           </header>
 
           {error ? (
-            <div style={{ marginBottom: 12, color: "rgba(248,113,113,0.95)" }}>Error: {error}</div>
+            <div style={{ marginBottom: 12, color: "rgba(248,113,113,0.95)" }}>
+              Error: {error}
+            </div>
           ) : null}
 
-          {/* Controls */}
           <section
             style={{
               display: "grid",
@@ -197,9 +175,11 @@ export default function PatientDashboard() {
                   ))
                 )}
               </select>
+
               {patientId && (
                 <div style={{ marginTop: 6, fontSize: 12, color: "rgba(148,163,184,0.9)" }}>
-                  Active: <strong style={{ color: "#e5e7eb" }}>{activePatientName || "—"}</strong>
+                  Active:{" "}
+                  <strong style={{ color: "#e5e7eb" }}>{activePatientName || "—"}</strong>
                 </div>
               )}
             </div>
@@ -219,7 +199,6 @@ export default function PatientDashboard() {
             </button>
           </section>
 
-          {/* KPI row */}
           <section
             style={{
               display: "grid",
@@ -256,8 +235,7 @@ export default function PatientDashboard() {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, color: "rgba(148,163,184,0.85)" }}>
-            Tip: You can open a specific prescription via URL:{" "}
-            <code>/patient/prescriptions/:id</code>
+            Tip: You can open a specific prescription via URL: <code>/patient/prescriptions/:id</code>
           </div>
         </div>
       </div>
@@ -266,21 +244,27 @@ export default function PatientDashboard() {
 }
 
 function normalizePrescription(row) {
-  const lines = Array.isArray(row?.prescription_items) ? row.prescription_items : [];
+  // supports BOTH shapes:
+  // 1) API returns: prescription_items (snake_case)
+  // 2) maybe later you pass: items (already normalized)
+  const rawLines =
+    (Array.isArray(row?.prescription_items) && row.prescription_items) ||
+    (Array.isArray(row?.items) && row.items) ||
+    [];
 
   return {
     id: row.id,
-    patientId: row.patient_id,
-    patientName: row.patient_name,
+    patientId: row.patient_id ?? row.patientId,
+    patientName: row.patient_name ?? row.patientName,
     status: row.status,
-    createdAt: row.created_at,
-    sentAt: row.sent_at,
-    pharmacyAt: row.pharmacy_at,
-    rejectionReason: row.rejection_reason,
-    pickupInstructions: row.pickup_instructions,
-    items: lines.map((x) => ({
+    createdAt: row.created_at ?? row.createdAt,
+    sentAt: row.sent_at ?? row.sentAt,
+    pharmacyAt: row.pharmacy_at ?? row.pharmacyAt,
+    rejectionReason: row.rejection_reason ?? row.rejectionReason,
+    pickupInstructions: row.pickup_instructions ?? row.pickupInstructions,
+    items: rawLines.map((x) => ({
       id: x.id,
-      medicineId: x.medicine_id,
+      medicineId: x.medicine_id ?? x.medicineId,
       name: x.name,
       strength: x.strength,
       form: x.form,
