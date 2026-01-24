@@ -1,7 +1,8 @@
 import { useMemo, useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { DOCTOR_CASES } from "../../data/doctorCases.js";
-import { supabase } from "../../supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
+
 
 export default function DoctorCaseView() {
   const { id } = useParams();

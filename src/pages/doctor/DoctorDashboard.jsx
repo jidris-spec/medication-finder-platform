@@ -1,14 +1,21 @@
+// src/pages/doctor/DoctorDashboard.jsx
 import { Link, useNavigate } from "react-router-dom";
 import { DOCTOR_CASES } from "../../data/doctorCases.js";
 import DoctorCaseCard from "./DoctorCaseCard.jsx";
-import { supabase } from "../../supabaseClient"; // ✅ add this
+import { useAuth } from "../../providers/AuthProvider.jsx";
 
 export default function DoctorDashboard() {
   const navigate = useNavigate();
+  const { signOut } = useAuth();
 
   async function handleLogout() {
-    await supabase.auth.signOut();
-    navigate("/login"); // ✅ React Router redirect
+    try {
+      await signOut();
+      // auth state updates immediately via AuthProvider
+      navigate("/login", { replace: true });
+    } catch (e) {
+      console.error("Logout failed:", e?.message || e);
+    }
   }
 
   return (
@@ -50,7 +57,14 @@ export default function DoctorDashboard() {
 
         <div style={{ position: "relative", zIndex: 1 }}>
           <header style={{ marginBottom: "1.75rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "1rem",
+              }}
+            >
               <h1
                 style={{
                   fontSize: "1.7rem",
@@ -100,7 +114,10 @@ export default function DoctorDashboard() {
               marginBottom: "1.5rem",
             }}
           >
-            <Link to="/doctor/new-prescription" style={{ textDecoration: "none", color: "inherit" }}>
+            <Link
+              to="/doctor/new-prescription"
+              style={{ textDecoration: "none", color: "inherit" }}
+            >
               <ActionCard
                 title="New prescription"
                 desc="Create a prescription for a patient (next step)."
@@ -108,7 +125,10 @@ export default function DoctorDashboard() {
               />
             </Link>
 
-            <Link to="/doctor/prescriptions" style={{ textDecoration: "none", color: "inherit" }}>
+            <Link
+              to="/doctor/prescriptions"
+              style={{ textDecoration: "none", color: "inherit" }}
+            >
               <ActionCard
                 title="Prescriptions"
                 desc="View saved drafts and sent prescriptions."
@@ -167,11 +187,23 @@ export default function DoctorDashboard() {
                 marginBottom: "0.6rem",
               }}
             >
-              <h2 style={{ fontSize: "1rem", fontWeight: 600, color: "#e5e7eb" }}>
+              <h2
+                style={{
+                  fontSize: "1rem",
+                  fontWeight: 600,
+                  color: "#e5e7eb",
+                }}
+              >
                 Assigned cases
               </h2>
-              <span style={{ fontSize: "0.78rem", color: "rgba(148,163,184,0.9)" }}>
-                {DOCTOR_CASES.length} case{DOCTOR_CASES.length !== 1 ? "s" : ""} assigned
+              <span
+                style={{
+                  fontSize: "0.78rem",
+                  color: "rgba(148,163,184,0.9)",
+                }}
+              >
+                {DOCTOR_CASES.length} case{DOCTOR_CASES.length !== 1 ? "s" : ""}{" "}
+                assigned
               </span>
             </div>
 

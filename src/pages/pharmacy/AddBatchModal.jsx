@@ -1,6 +1,7 @@
 // src/pages/pharmacy/AddBatchModal.jsx
 import { useState } from "react";
-import { supabase } from "../../supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
+
 
 function AddBatchModal({ med, onClose, onBatchAdded }) {
   const [form, setForm] = useState({

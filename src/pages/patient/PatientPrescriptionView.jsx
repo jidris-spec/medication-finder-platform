@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getPrescription } from "../../data/prescriptionsApi";
+import { getPrescriptionById } from "../../data/prescriptionsApi";
 
 export default function PatientPrescriptionView() {
   const { id } = useParams();
   const [p, setP] = useState(null);
   const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     load();
@@ -14,13 +15,24 @@ export default function PatientPrescriptionView() {
 
   async function load() {
     setError(null);
+    setLoading(true);
     try {
-      const row = await getPrescription(id);
+      const row = await getPrescriptionById(id);
       setP(normalizePrescription(row));
     } catch (e) {
-      setError(e?.message || "Failed to load prescription from Supabase.");
+      setError(e?.message || "Failed to load prescription.");
       setP(null);
+    } finally {
+      setLoading(false);
     }
+  }
+
+  if (loading) {
+    return (
+      <div style={{ padding: "2rem", color: "rgba(148,163,184,0.95)" }}>
+        Loading prescription…
+      </div>
+    );
   }
 
   if (error) {
@@ -39,40 +51,34 @@ export default function PatientPrescriptionView() {
     );
   }
 
-  const status = p.status || "Draft";
-  const createdAt = p.createdAt ? safeDate(p.createdAt) : null;
-  const sentAt = p.sentAt ? safeDate(p.sentAt) : null;
-  const pharmacyAt = p.pharmacyAt ? safeDate(p.pharmacyAt) : null;
-
-  const rejectionText = p.rejectionReason ?? p.rejection_reason ?? p.reason ?? "";
-  const pickupText = p.pickupInstructions ?? p.pickup_instructions ?? "";
+  const status = normalizeStatus(p.status);
 
   const timeline = [
     {
       key: "created",
       title: "Created",
-      done: !!createdAt,
-      date: createdAt,
-      desc: "Doctor created the prescription draft.",
+      done: !!p.createdAt,
+      date: p.createdAt,
+      desc: "Doctor created the prescription.",
     },
     {
       key: "sent",
       title: "Sent to pharmacy",
-      done: status !== "Draft" && !!sentAt,
-      date: sentAt,
-      desc: "Doctor sent the prescription to pharmacy inbox.",
+      done: status !== "Draft" && !!p.sentAt,
+      date: p.sentAt,
+      desc: "Doctor sent the prescription to pharmacy.",
     },
     {
       key: "pharmacy",
       title: "Pharmacy decision",
       done: status === "Fulfilled" || status === "Rejected",
-      date: pharmacyAt,
+      date: p.pharmacyAt,
       desc:
         status === "Fulfilled"
-          ? "Pharmacy confirmed fulfillment."
+          ? "Pharmacy fulfilled the prescription."
           : status === "Rejected"
           ? "Pharmacy rejected the prescription."
-          : "Pending pharmacy action.",
+          : "Waiting for pharmacy action.",
     },
   ];
 
@@ -154,150 +160,47 @@ export default function PatientPrescriptionView() {
 
         {/* Timeline */}
         <section style={panel}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-            }}
-          >
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
             <h2 style={panelTitle}>Status timeline</h2>
             <button type="button" onClick={load} style={ghostBtn}>
               Refresh
             </button>
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-              marginTop: 10,
-            }}
-          >
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
             {timeline.map((t) => (
-              <div
-                key={t.key}
-                style={{
-                  backgroundColor: "rgba(2,6,23,0.9)",
-                  borderRadius: "0.9rem",
-                  border: "1px solid rgba(51,65,85,0.95)",
-                  padding: "0.85rem 0.9rem",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 900, color: "#e5e7eb" }}>
-                    {t.done ? "✅" : "⏳"} {t.title}
-                  </div>
-                  <div
-                    style={{
-                      marginTop: 4,
-                      fontSize: 13,
-                      color: "rgba(148,163,184,0.95)",
-                    }}
-                  >
-                    {t.desc}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: "rgba(148,163,184,0.95)",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {t.date ? t.date : "—"}
-                </div>
-              </div>
+              <TimelineItem key={t.key} item={t} />
             ))}
           </div>
 
-          {status === "Rejected" ? (
-            <div
-              style={{
-                marginTop: 12,
-                padding: "0.9rem",
-                borderRadius: "0.9rem",
-                border: "1px solid rgba(248,113,113,0.35)",
-                backgroundColor: "rgba(2,6,23,0.85)",
-                color: "rgba(248,113,113,0.95)",
-              }}
-            >
-              <strong>Pharmacy rejection reason:</strong>{" "}
-              {String(rejectionText).trim()
-                ? rejectionText
-                : "No reason provided."}
-            </div>
-          ) : null}
+          {status === "Rejected" && (
+            <Notice color="danger" title="Pharmacy rejection reason">
+              {p.rejectionReason || "No reason provided."}
+            </Notice>
+          )}
 
-          {status === "Fulfilled" ? (
-            <div
-              style={{
-                marginTop: 12,
-                padding: "0.9rem",
-                borderRadius: "0.9rem",
-                border: "1px solid rgba(34,197,94,0.35)",
-                backgroundColor: "rgba(2,6,23,0.85)",
-                color: "rgba(34,197,94,0.95)",
-              }}
-            >
-              <strong>Pickup instructions:</strong>{" "}
-              {String(pickupText).trim()
-                ? pickupText
-                : "No instructions provided."}
-            </div>
-          ) : null}
+          {status === "Fulfilled" && (
+            <Notice color="success" title="Pickup instructions">
+              {p.pickupInstructions || "No instructions provided."}
+            </Notice>
+          )}
         </section>
 
-        {/* Items */}
+        {/* Medicines */}
         <section style={panel}>
           <h2 style={panelTitle}>Medicines</h2>
 
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-            }}
-          >
-            {(p.items || []).map((line) => (
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+            {p.items.map((line) => (
               <div key={line.id} style={lineCard}>
-                <div>
-                  <div style={{ fontWeight: 900, color: "#e5e7eb" }}>
-                    {line.name} {line.strength ? `· ${line.strength}` : ""}{" "}
-                    {line.form ? `· ${line.form}` : ""}
-                  </div>
-
-                  <div
-                    style={{
-                      marginTop: 4,
-                      fontSize: 13,
-                      color: "rgba(148,163,184,0.95)",
-                    }}
-                  >
-                    Qty: <strong>{line.qty}</strong>
-                    {" · "}
-                    {line.instructions
-                      ? `Instructions: ${line.instructions}`
-                      : "No instructions"}
-                  </div>
-
-                  {line.medicineId ? (
-                    <div
-                      style={{
-                        marginTop: 4,
-                        fontSize: 12,
-                        color: "rgba(148,163,184,0.75)",
-                      }}
-                    >
-                      medicineId: {line.medicineId}
-                    </div>
-                  ) : null}
+                <div style={{ fontWeight: 900, color: "#e5e7eb" }}>
+                  {line.name}
+                  {line.strength ? ` · ${line.strength}` : ""}
+                  {line.form ? ` · ${line.form}` : ""}
+                </div>
+                <div style={{ marginTop: 4, fontSize: 13, color: "rgba(148,163,184,0.95)" }}>
+                  Qty: <strong>{line.qty}</strong>{" "}
+                  · {line.instructions || "No instructions"}
                 </div>
               </div>
             ))}
@@ -315,12 +218,9 @@ export default function PatientPrescriptionView() {
               marginTop: 10,
             }}
           >
-            <Meta label="Created" value={p.createdAt ? safeDate(p.createdAt) : "—"} />
-            <Meta label="Sent" value={p.sentAt ? safeDate(p.sentAt) : "—"} />
-            <Meta
-              label="Pharmacy action"
-              value={p.pharmacyAt ? safeDate(p.pharmacyAt) : "—"}
-            />
+            <Meta label="Created" value={fmt(p.createdAt)} />
+            <Meta label="Sent" value={fmt(p.sentAt)} />
+            <Meta label="Pharmacy action" value={fmt(p.pharmacyAt)} />
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, color: "rgba(148,163,184,0.8)" }}>
@@ -332,9 +232,10 @@ export default function PatientPrescriptionView() {
   );
 }
 
+/* ---------------- helpers ---------------- */
+
 function normalizePrescription(row) {
   const lines = Array.isArray(row?.prescription_items) ? row.prescription_items : [];
-
   return {
     id: row.id,
     patientId: row.patient_id,
@@ -357,6 +258,76 @@ function normalizePrescription(row) {
   };
 }
 
+function normalizeStatus(s) {
+  const v = String(s || "").toLowerCase();
+  if (v === "sent") return "Sent";
+  if (v === "fulfilled" || v === "completed") return "Fulfilled";
+  if (v === "rejected") return "Rejected";
+  return "Draft";
+}
+
+function fmt(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function TimelineItem({ item }) {
+  return (
+    <div
+      style={{
+        backgroundColor: "rgba(2,6,23,0.9)",
+        borderRadius: "0.9rem",
+        border: "1px solid rgba(51,65,85,0.95)",
+        padding: "0.85rem 0.9rem",
+        display: "flex",
+        justifyContent: "space-between",
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 900, color: "#e5e7eb" }}>
+          {item.done ? "✅" : "⏳"} {item.title}
+        </div>
+        <div style={{ marginTop: 4, fontSize: 13, color: "rgba(148,163,184,0.95)" }}>
+          {item.desc}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "rgba(148,163,184,0.95)" }}>
+        {fmt(item.date)}
+      </div>
+    </div>
+  );
+}
+
+function Notice({ title, color, children }) {
+  const palette =
+    color === "success"
+      ? "rgba(34,197,94,0.35)"
+      : "rgba(248,113,113,0.35)";
+  const text =
+    color === "success"
+      ? "rgba(34,197,94,0.95)"
+      : "rgba(248,113,113,0.95)";
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: "0.9rem",
+        borderRadius: "0.9rem",
+        border: `1px solid ${palette}`,
+        backgroundColor: "rgba(2,6,23,0.85)",
+        color: text,
+      }}
+    >
+      <strong>{title}:</strong> {children}
+    </div>
+  );
+}
+
 function Meta({ label, value }) {
   return (
     <div
@@ -375,15 +346,8 @@ function Meta({ label, value }) {
   );
 }
 
-function safeDate(iso) {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return String(iso);
-  }
-}
+/* ---------------- styles ---------------- */
 
-// styles
 const panel = {
   marginTop: "1rem",
   backgroundColor: "rgba(15,23,42,0.96)",

@@ -1,7 +1,12 @@
 // src/pages/pharmacy/PharmacyInbox.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "../../supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
+import {
+  STATUS,
+  fulfillPrescriptionAtomic,
+  pharmacyDecision,
+} from "../../data/prescriptionsApi";
 
 // Matching rule between prescription item and inventory row (fallback)
 function makeKey(name, strength, form) {
@@ -10,8 +15,20 @@ function makeKey(name, strength, form) {
     .toLowerCase()}|${String(form || "").trim().toLowerCase()}`;
 }
 
+const REJECTION_CODES = [
+  { value: "out_of_stock", label: "Out of stock" },
+  { value: "insufficient_stock", label: "Insufficient stock" },
+  { value: "not_found", label: "Medicine not found" },
+  { value: "expired_batches_only", label: "Only expired batches" },
+  { value: "invalid_prescription", label: "Invalid prescription" },
+  { value: "other", label: "Other" },
+];
+
+function normalizeStatus(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
 export default function PharmacyInbox() {
-  // inbox items (Supabase)
   const [items, setItems] = useState([]);
 
   // inventory (Supabase)
@@ -26,29 +43,33 @@ export default function PharmacyInbox() {
   // prevent double actions per prescription
   const [actingId, setActingId] = useState(null);
 
-  // ------------------------
-  // LOAD: inbox + inventory
-  // ------------------------
+  // Reject modal state (structured)
+  const [rejecting, setRejecting] = useState(null); // prescription object
+  const [rejectCode, setRejectCode] = useState("");
+  const [rejectNote, setRejectNote] = useState("");
+
+  const aliveRef = useRef(true);
+
   useEffect(() => {
-    let alive = true;
+    aliveRef.current = true;
 
     (async () => {
       setError(null);
-      await Promise.all([loadInbox(alive), loadInventory(alive)]);
+      await Promise.all([loadInbox(), loadInventory()]);
     })();
 
     return () => {
-      alive = false;
+      aliveRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // effect only once; we handle strict mode by guarding with "alive"
+  }, []);
 
   async function loadAll() {
     setError(null);
-    await Promise.all([loadInbox(true), loadInventory(true)]);
+    await Promise.all([loadInbox(), loadInventory()]);
   }
 
-  async function loadInbox(aliveFlag = true) {
+  async function loadInbox() {
     setLoadingInbox(true);
     setError(null);
 
@@ -75,10 +96,11 @@ export default function PharmacyInbox() {
         )
       `
       )
-      .eq("status", "Sent")
-      .order("sent_at", { ascending: false });
+      // ✅ only canonical status
+      .eq("status", STATUS.SENT)
+      .order("sent_at", { ascending: false, nullsFirst: false });
 
-    if (!aliveFlag) return;
+    if (!aliveRef.current) return;
 
     if (err) {
       setError(err.message);
@@ -87,13 +109,12 @@ export default function PharmacyInbox() {
       return;
     }
 
-    // Normalize into UI-friendly shape
     const normalized =
       (data || []).map((p) => ({
         id: p.id,
         patientId: p.patient_id,
         patientName: p.patient_name,
-        status: p.status,
+        status: normalizeStatus(p.status), // normalize for UI safety
         createdAt: p.created_at,
         sentAt: p.sent_at,
         pharmacyAt: p.pharmacy_at,
@@ -113,7 +134,7 @@ export default function PharmacyInbox() {
     setLoadingInbox(false);
   }
 
-  async function loadInventory(aliveFlag = true) {
+  async function loadInventory() {
     setLoadingInv(true);
     setError(null);
 
@@ -121,11 +142,13 @@ export default function PharmacyInbox() {
       { data: meds, error: medsError },
       { data: batchData, error: batchError },
     ] = await Promise.all([
-      supabase.from("pharmacy").select("id,name,strength,form"),
-      supabase.from("batches").select("id,medicine_id,quantity,expiry_date"),
+      supabase.from("medicines").select("id,name,strength,form"),
+      supabase
+        .from("batches")
+        .select("id,medicine_id,quantity,expiry_date,created_at"),
     ]);
 
-    if (!aliveFlag) return;
+    if (!aliveRef.current) return;
 
     if (medsError) {
       setError(medsError.message);
@@ -149,17 +172,21 @@ export default function PharmacyInbox() {
   // ------------------------
   // INVENTORY INDEXES
   // ------------------------
+  const medicineById = useMemo(() => {
+    const map = new Map();
+    for (const m of medicines) map.set(String(m.id), m);
+    return map;
+  }, [medicines]);
+
   const inventoryIndex = useMemo(() => {
     const map = new Map();
     for (const m of medicines) {
       const key = makeKey(m.name, m.strength, m.form);
-      if (!key) continue;
       map.set(key, m);
     }
     return map;
   }, [medicines]);
 
-  // total stock per medicine_id (fast lookup)
   const stockByMedicineId = useMemo(() => {
     const map = new Map();
     for (const b of batches) {
@@ -183,12 +210,10 @@ export default function PharmacyInbox() {
     const results = lines.map((line) => {
       let med = null;
 
-      // prefer medicineId
       if (line.medicineId) {
-        med = medicines.find((m) => String(m.id) === String(line.medicineId)) || null;
+        med = medicineById.get(String(line.medicineId)) || null;
       }
 
-      // fallback: string matching
       if (!med) {
         const key = makeKey(line.name, line.strength, line.form);
         med = inventoryIndex.get(key) || null;
@@ -200,7 +225,7 @@ export default function PharmacyInbox() {
           match: null,
           availableQty: 0,
           ok: false,
-          reason: "Not found in inventory",
+          reason: "Not found in medicines table",
         };
       }
 
@@ -217,47 +242,100 @@ export default function PharmacyInbox() {
       };
     });
 
-    const canFulfill = results.length > 0 && results.every((r) => r.ok);
+    const canFulfill =
+      results.length > 0 &&
+      results.every((x) => Number(x.availableQty || 0) >= Number(x.qty || 0));
 
-    const missing = results.filter((r) => !r.ok).map((r) => {
-      if (!r.match)
-        return `${r.name} ${r.strength || ""} ${r.form || ""} (not found)`.trim();
-      return `${r.name} ${r.strength || ""} ${r.form || ""} (need ${r.qty}, have ${r.availableQty})`.trim();
-    });
+    const missing = results
+      .filter((r) => !r.ok)
+      .map((r) => {
+        if (!r.match)
+          return `${r.name} ${r.strength || ""} ${r.form || ""} (not found)`.trim();
+        return `${r.name} ${r.strength || ""} ${r.form || ""} (need ${r.qty}, have ${r.availableQty})`.trim();
+      });
 
-    const suggestedReason =
-      missing.length > 0 ? `Not available / insufficient stock: ${missing.join(", ")}` : "";
+    return { results, canFulfill, missing };
+  }
 
-    return { results, canFulfill, suggestedReason };
+  function computeSuggestedReject(missing) {
+    if (!missing || missing.length === 0) {
+      return { code: "other", note: "" };
+    }
+
+    const anyNotFound = missing.some((m) => m.toLowerCase().includes("not found"));
+    const code = anyNotFound ? "not_found" : "insufficient_stock";
+
+    // keep note short (DB also trims)
+    const note = missing.join(", ").slice(0, 140);
+    return { code, note };
   }
 
   // ------------------------
-  // UPDATE STATUS IN SUPABASE
+  // REJECT (structured + DB enforced)
   // ------------------------
-  async function updateStatus(prescriptionId, status, reason = "") {
-    if (actingId) return; // lock global to prevent spam clicks
-    setActingId(prescriptionId);
+  function openRejectModal(p, missing) {
+    const sug = computeSuggestedReject(missing);
+    setRejecting(p);
+    setRejectCode(sug.code);
+    setRejectNote(sug.note);
     setError(null);
+  }
 
-    const patch = {
-      status,
-      pharmacy_at: new Date().toISOString(),
-      rejection_reason: status === "Rejected" ? reason : null,
-    };
+  function closeRejectModal() {
+    setRejecting(null);
+    setRejectCode("");
+    setRejectNote("");
+  }
 
-    const { error: err } = await supabase
-      .from("prescriptions")
-      .update(patch)
-      .eq("id", prescriptionId);
+  async function submitReject() {
+    if (!rejecting) return;
+    if (actingId) return;
 
-    if (err) {
-      setError(err.message);
-      setActingId(null);
+    if (!rejectCode) {
+      setError("Please select a rejection reason.");
       return;
     }
 
-    await loadInbox(true);
-    setActingId(null);
+    const reason = rejectNote?.trim()
+      ? `${rejectCode} | ${rejectNote.trim()}`
+      : rejectCode;
+
+    setActingId(rejecting.id);
+    setError(null);
+
+    try {
+      await pharmacyDecision({
+        id: rejecting.id,
+        action: "REJECT",
+        reason,
+      });
+
+      closeRejectModal();
+      await Promise.all([loadInbox(), loadInventory()]);
+    } catch (e) {
+      setError(e?.message || "Failed to reject prescription.");
+    } finally {
+      setActingId(null);
+    }
+  }
+
+  // ------------------------
+  // ATOMIC FULFILL (RPC)
+  // ------------------------
+  async function handleFulfill(prescriptionId) {
+    if (actingId) return;
+
+    setActingId(prescriptionId);
+    setError(null);
+
+    try {
+      await fulfillPrescriptionAtomic(prescriptionId, "Show ID at counter");
+      await Promise.all([loadInbox(), loadInventory()]);
+    } catch (e) {
+      setError(e?.message || "Failed to fulfill prescription.");
+    } finally {
+      setActingId(null);
+    }
   }
 
   // ------------------------
@@ -274,28 +352,14 @@ export default function PharmacyInbox() {
 
       <h1 style={{ marginTop: "1rem" }}>Pharmacy Inbox</h1>
       <p style={{ marginTop: 0, color: "rgba(148,163,184,0.95)" }}>
-        Prescriptions sent by doctors and awaiting action. Fulfillment is locked unless all items are available in inventory.
+        Prescriptions sent by doctors and awaiting action. Fulfillment is locked
+        unless all items are available in inventory.
       </p>
 
-      {/* Status + actions */}
-      <div
-        style={{
-          marginTop: "0.75rem",
-          marginBottom: "1rem",
-          padding: "0.85rem 1rem",
-          borderRadius: "1rem",
-          border: "1px solid rgba(51,65,85,0.95)",
-          backgroundColor: "rgba(15,23,42,0.96)",
-          color: "rgba(148,163,184,0.95)",
-          display: "flex",
-          justifyContent: "space-between",
-          gap: 12,
-          alignItems: "baseline",
-        }}
-      >
+      <div style={summaryCard}>
         <div>
           {loadingInv ? (
-            <span>Loading inventory from Supabase…</span>
+            <span>Loading inventory…</span>
           ) : (
             <span>
               Inventory loaded: <strong>{medicines.length}</strong> medicine(s),{" "}
@@ -307,7 +371,7 @@ export default function PharmacyInbox() {
             <span>Loading inbox…</span>
           ) : (
             <span>
-              Inbox: <strong>{items.length}</strong> prescription(s) sent.
+              Inbox: <strong>{items.length}</strong> prescription(s) {STATUS.SENT}.
             </span>
           )}
 
@@ -345,27 +409,12 @@ export default function PharmacyInbox() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {items.map((p) => {
-            const { results, canFulfill, suggestedReason } = getAvailabilityForPrescription(p);
+            const { results, canFulfill, missing } = getAvailabilityForPrescription(p);
             const isActing = actingId === p.id;
 
             return (
-              <div
-                key={p.id}
-                style={{
-                  backgroundColor: "rgba(15,23,42,0.96)",
-                  borderRadius: "1rem",
-                  border: "1px solid rgba(51,65,85,0.95)",
-                  padding: "1.1rem 1.2rem",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "baseline",
-                    gap: "1rem",
-                  }}
-                >
+              <div key={p.id} style={card}>
+                <div style={cardHeader}>
                   <div>
                     <div style={{ fontWeight: 900, color: "#e5e7eb" }}>
                       {p.patientName} ·{" "}
@@ -373,33 +422,15 @@ export default function PharmacyInbox() {
                         {p.patientId}
                       </span>
                     </div>
-                    <div
-                      style={{
-                        fontSize: "0.82rem",
-                        color: "rgba(148,163,184,0.95)",
-                        marginTop: 4,
-                      }}
-                    >
+                    <div style={subText}>
                       {p.items?.length ?? 0} medicine(s) · Sent{" "}
                       {p.sentAt ? new Date(p.sentAt).toLocaleString() : ""}
                     </div>
                   </div>
 
-                  <span
-                    style={{
-                      fontSize: "0.75rem",
-                      border: "1px solid rgba(148,163,184,0.35)",
-                      borderRadius: "999px",
-                      padding: "0.2rem 0.6rem",
-                      color: "rgba(229,231,235,0.95)",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    Sent
-                  </span>
+                  <span style={chip}>{STATUS.SENT}</span>
                 </div>
 
-                {/* Availability lines */}
                 <div
                   style={{
                     marginTop: "0.9rem",
@@ -415,15 +446,7 @@ export default function PharmacyInbox() {
                     return (
                       <div
                         key={`${line.id}-${line.name}-${line.strength}-${line.form}`}
-                        style={{
-                          backgroundColor: "rgba(2,6,23,0.9)",
-                          borderRadius: "0.9rem",
-                          border: "1px solid rgba(51,65,85,0.95)",
-                          padding: "0.75rem 0.85rem",
-                          display: "flex",
-                          justifyContent: "space-between",
-                          gap: "1rem",
-                        }}
+                        style={lineCard}
                       >
                         <div>
                           <div style={{ fontWeight: 800, color: "#e5e7eb" }}>
@@ -432,13 +455,7 @@ export default function PharmacyInbox() {
                             {line.form ? ` · ${line.form}` : ""}
                           </div>
 
-                          <div
-                            style={{
-                              marginTop: 4,
-                              fontSize: "0.82rem",
-                              color: "rgba(148,163,184,0.95)",
-                            }}
-                          >
+                          <div style={lineMeta}>
                             Needed: <strong>{line.qty}</strong>
                             {" · "}
                             Available:{" "}
@@ -456,26 +473,11 @@ export default function PharmacyInbox() {
                           </div>
 
                           {line.medicineId ? (
-                            <div
-                              style={{
-                                marginTop: 4,
-                                fontSize: 12,
-                                color: "rgba(148,163,184,0.75)",
-                              }}
-                            >
-                              medicineId: {line.medicineId}
-                            </div>
+                            <div style={idText}>medicineId: {line.medicineId}</div>
                           ) : null}
                         </div>
 
-                        <div
-                          style={{
-                            fontSize: "0.78rem",
-                            color: "rgba(148,163,184,0.95)",
-                            whiteSpace: "nowrap",
-                            alignSelf: "center",
-                          }}
-                        >
+                        <div style={lineRight}>
                           {line.instructions ? `“${line.instructions}”` : ""}
                         </div>
                       </div>
@@ -483,61 +485,40 @@ export default function PharmacyInbox() {
                   })}
                 </div>
 
-                {/* Actions */}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "flex-end",
-                    gap: 10,
-                    marginTop: "0.9rem",
-                  }}
-                >
+                <div style={actions}>
                   <button
-                    onClick={() => {
-                      const defaultText = suggestedReason || "Rejected by pharmacy";
-                      const reason = window.prompt("Reason for rejection? (required)", defaultText);
-                      if (!reason || !reason.trim()) return;
-                      updateStatus(p.id, "Rejected", reason.trim());
-                    }}
+                    onClick={() => openRejectModal(p, missing)}
                     style={dangerBtn}
-                    disabled={loadingInv || !!error || !!actingId}
+                    disabled={loadingInv || !!actingId}
                   >
                     {isActing ? "Updating…" : "Reject"}
                   </button>
 
                   <button
-                    onClick={() => updateStatus(p.id, "Fulfilled")}
-                    disabled={loadingInv || !!error || !canFulfill || !!actingId}
+                    onClick={() => handleFulfill(p.id)}
+                    disabled={loadingInv || !canFulfill || !!actingId}
                     style={{
                       ...successBtn,
-                      opacity: loadingInv || !!error || !canFulfill || !!actingId ? 0.45 : 1,
+                      opacity: loadingInv || !canFulfill || !!actingId ? 0.45 : 1,
                       cursor:
-                        loadingInv || !!error || !canFulfill || !!actingId
+                        loadingInv || !canFulfill || !!actingId
                           ? "not-allowed"
                           : "pointer",
                     }}
                     title={
                       loadingInv
                         ? "Wait for inventory to load"
-                        : error
-                        ? "Fix error first"
                         : canFulfill
                         ? "All items available"
                         : "Cannot fulfill: missing/insufficient stock"
                     }
                   >
-                    {isActing ? "Updating…" : "Fulfilled"}
+                    {isActing ? "Updating…" : "Fulfill"}
                   </button>
                 </div>
 
-                {!canFulfill && !loadingInv && !error && (
-                  <div
-                    style={{
-                      marginTop: "0.75rem",
-                      fontSize: "0.82rem",
-                      color: "rgba(248,113,113,0.9)",
-                    }}
-                  >
+                {!canFulfill && !loadingInv && (
+                  <div style={lockedText}>
                     Fulfillment locked: not all items are available.
                   </div>
                 )}
@@ -546,9 +527,163 @@ export default function PharmacyInbox() {
           })}
         </div>
       )}
+
+      {/* -------- Reject Modal (structured) -------- */}
+      {rejecting ? (
+        <div style={modalOverlay} onClick={closeRejectModal}>
+          <div style={modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+              <div>
+                <h3 style={{ margin: 0, color: "#e5e7eb" }}>Reject prescription</h3>
+                <div style={{ marginTop: 6, color: "rgba(148,163,184,0.95)", fontSize: 13 }}>
+                  Patient: <strong style={{ color: "#e5e7eb" }}>{rejecting.patientName}</strong>
+                </div>
+              </div>
+              <button type="button" onClick={closeRejectModal} style={modalCloseBtn}>
+                ✕
+              </button>
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              <label style={label}>Reason code (required)</label>
+              <select
+                value={rejectCode}
+                onChange={(e) => setRejectCode(e.target.value)}
+                style={select}
+              >
+                <option value="">Select reason</option>
+                {REJECTION_CODES.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <label style={label}>Details (optional, max 140 chars)</label>
+              <textarea
+                value={rejectNote}
+                onChange={(e) => setRejectNote(e.target.value)}
+                style={textarea}
+                placeholder="e.g. Ibuprofen 400mg tablet (need 3, have 0)"
+                maxLength={140}
+              />
+              <div style={{ marginTop: 6, fontSize: 12, color: "rgba(148,163,184,0.85)" }}>
+                {rejectNote.length}/140
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+              <button type="button" onClick={closeRejectModal} style={ghostBtn}>
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={submitReject}
+                style={{
+                  ...dangerBtn,
+                  opacity: actingId ? 0.6 : 1,
+                  cursor: actingId ? "not-allowed" : "pointer",
+                }}
+                disabled={!!actingId}
+              >
+                {actingId ? "Rejecting…" : "Confirm Reject"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
+
+// ---------------- styles ----------------
+const summaryCard = {
+  marginTop: "0.75rem",
+  marginBottom: "1rem",
+  padding: "0.85rem 1rem",
+  borderRadius: "1rem",
+  border: "1px solid rgba(51,65,85,0.95)",
+  backgroundColor: "rgba(15,23,42,0.96)",
+  color: "rgba(148,163,184,0.95)",
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 12,
+  alignItems: "baseline",
+};
+
+const card = {
+  backgroundColor: "rgba(15,23,42,0.96)",
+  borderRadius: "1rem",
+  border: "1px solid rgba(51,65,85,0.95)",
+  padding: "1.1rem 1.2rem",
+};
+
+const cardHeader = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "baseline",
+  gap: "1rem",
+};
+
+const subText = {
+  fontSize: "0.82rem",
+  color: "rgba(148,163,184,0.95)",
+  marginTop: 4,
+};
+
+const chip = {
+  fontSize: "0.75rem",
+  border: "1px solid rgba(148,163,184,0.35)",
+  borderRadius: "999px",
+  padding: "0.2rem 0.6rem",
+  color: "rgba(229,231,235,0.95)",
+  whiteSpace: "nowrap",
+};
+
+const lineCard = {
+  backgroundColor: "rgba(2,6,23,0.9)",
+  borderRadius: "0.9rem",
+  border: "1px solid rgba(51,65,85,0.95)",
+  padding: "0.75rem 0.85rem",
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "1rem",
+};
+
+const lineMeta = {
+  marginTop: 4,
+  fontSize: "0.82rem",
+  color: "rgba(148,163,184,0.95)",
+};
+
+const idText = {
+  marginTop: 4,
+  fontSize: 12,
+  color: "rgba(148,163,184,0.75)",
+};
+
+const lineRight = {
+  fontSize: "0.78rem",
+  color: "rgba(148,163,184,0.95)",
+  whiteSpace: "nowrap",
+  alignSelf: "center",
+};
+
+const actions = {
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: 10,
+  marginTop: "0.9rem",
+};
+
+const lockedText = {
+  marginTop: "0.75rem",
+  fontSize: "0.82rem",
+  color: "rgba(248,113,113,0.9)",
+};
 
 const successBtn = {
   padding: "0.6rem 0.9rem",
@@ -566,7 +701,6 @@ const dangerBtn = {
   background: "rgba(2,6,23,0.8)",
   color: "rgba(248,113,113,0.95)",
   fontWeight: 900,
-  cursor: "pointer",
 };
 
 const ghostBtn = {
@@ -577,4 +711,64 @@ const ghostBtn = {
   color: "rgba(229,231,235,0.95)",
   fontWeight: 900,
   cursor: "pointer",
+};
+
+const modalOverlay = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.55)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 16,
+  zIndex: 999,
+};
+
+const modalCard = {
+  width: "min(560px, 100%)",
+  borderRadius: 16,
+  border: "1px solid rgba(51,65,85,0.95)",
+  background: "rgba(2,6,23,0.98)",
+  padding: "1rem 1rem 1.1rem",
+  boxShadow: "0 30px 90px rgba(0,0,0,0.6)",
+};
+
+const modalCloseBtn = {
+  borderRadius: 10,
+  border: "1px solid rgba(148,163,184,0.35)",
+  background: "rgba(15,23,42,0.8)",
+  color: "rgba(229,231,235,0.95)",
+  cursor: "pointer",
+  padding: "0.35rem 0.6rem",
+  fontWeight: 900,
+};
+
+const label = {
+  display: "block",
+  marginBottom: 6,
+  fontSize: 12,
+  color: "rgba(148,163,184,0.95)",
+  fontWeight: 900,
+};
+
+const select = {
+  width: "100%",
+  padding: "0.6rem 0.7rem",
+  borderRadius: 12,
+  border: "1px solid rgba(148,163,184,0.35)",
+  background: "rgba(15,23,42,0.8)",
+  color: "rgba(229,231,235,0.95)",
+  outline: "none",
+};
+
+const textarea = {
+  width: "100%",
+  minHeight: 90,
+  padding: "0.6rem 0.7rem",
+  borderRadius: 12,
+  border: "1px solid rgba(148,163,184,0.35)",
+  background: "rgba(15,23,42,0.8)",
+  color: "rgba(229,231,235,0.95)",
+  outline: "none",
+  resize: "vertical",
 };

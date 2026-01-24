@@ -1,333 +1,424 @@
 // src/pages/doctor/NewPrescription.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { supabase } from "../../supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
+import { listMedicines } from "../../data/medicinesApi";
+import { STATUS } from "../../data/prescriptionsApi"; // ✅ use canonical statuses
 
 export default function NewPrescription() {
   const navigate = useNavigate();
 
-  // auth (simple: read once)
-  const [userId, setUserId] = useState(null);
-  const [authError, setAuthError] = useState(null);
-
-  // patient
+  // Patient fields
   const [patientName, setPatientName] = useState("");
   const [patientId, setPatientId] = useState("");
 
-  // inventory
-  const [meds, setMeds] = useState([]);
-  const [loadingMeds, setLoadingMeds] = useState(true);
+  // Medicines catalog
+  const [medicines, setMedicines] = useState([]);
   const [medError, setMedError] = useState(null);
+  const [loadingMeds, setLoadingMeds] = useState(false);
 
-  // line editor
+  // Line inputs
   const [selectedMedicineId, setSelectedMedicineId] = useState("");
   const [qty, setQty] = useState(1);
   const [instructions, setInstructions] = useState("Take as directed");
 
-  // draft lines
-  const [items, setItems] = useState([]);
+  // Lines
+  const [lines, setLines] = useState([]);
 
-  // saving state
+  // Save state
+  const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(null);
 
-  // 1) get session once
+  // Load medicines on mount
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadSession() {
-      setAuthError(null);
-      const { data, error } = await supabase.auth.getSession();
-
-      if (cancelled) return;
-
-      if (error) {
-        setAuthError(error.message || "Failed to read auth session.");
-        setUserId(null);
-        return;
-      }
-
-      const id = data?.session?.user?.id ?? null;
-      setUserId(id);
-
-      if (!id) {
-        setAuthError("You are not logged in. Please login as a doctor.");
-      }
-    }
-
-    loadSession();
-    return () => {
-      cancelled = true;
-    };
+    loadMedicines();
   }, []);
 
-  // 2) load inventory
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadMeds() {
-      setLoadingMeds(true);
-      setMedError(null);
-
-      const { data, error } = await supabase
-        .from("pharmacy")
-        .select("id, name")
-        .order("name", { ascending: true });
-
-      if (cancelled) return;
-
-      if (error) {
-        setMedError(error.message || "Failed to load inventory");
-        setMeds([]);
-      } else {
-        setMeds(Array.isArray(data) ? data : []);
-      }
-
+  async function loadMedicines() {
+    setMedError(null);
+    setLoadingMeds(true);
+    try {
+      const data = await listMedicines(); // ✅ pharmacy-owned catalog
+      setMedicines(data || []);
+    } catch (e) {
+      setMedicines([]);
+      setMedError(e?.message || "Failed to load medicines catalog.");
+    } finally {
       setLoadingMeds(false);
     }
+  }
 
-    loadMeds();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const selectedMed = useMemo(() => {
-    if (!selectedMedicineId) return null;
-    return meds.find((m) => String(m.id) === String(selectedMedicineId)) || null;
-  }, [meds, selectedMedicineId]);
+  const medicineById = useMemo(() => {
+    const map = new Map();
+    for (const m of medicines) map.set(m.id, m);
+    return map;
+  }, [medicines]);
 
   function addLine() {
-    setSaveError(null);
-    if (!selectedMedicineId || !selectedMed) return;
+    setError(null);
 
-    const safeQty = Number.isFinite(Number(qty)) ? Math.max(1, Number(qty)) : 1;
-    const safeInstructions = (instructions || "").trim() || "Take as directed";
+    if (!selectedMedicineId) {
+      setError("Select a medicine.");
+      return;
+    }
 
-    setItems((prev) => [
+    const med = medicineById.get(selectedMedicineId);
+    if (!med) {
+      setError("Selected medicine not found. Refresh medicines.");
+      return;
+    }
+
+    const q = Number(qty);
+    if (!Number.isFinite(q) || q <= 0) {
+      setError("Quantity must be a positive number.");
+      return;
+    }
+
+    const instr = String(instructions || "").trim();
+
+    // Prevent duplicate same medicine (recommended)
+    const exists = lines.some((l) => String(l.medicine_id) === String(med.id));
+    if (exists) {
+      setError("This medicine is already added. Remove it first if you want to change quantity.");
+      return;
+    }
+
+    setLines((prev) => [
       ...prev,
       {
-        medicine_id: selectedMed.id,
-        medicine_name: selectedMed.name,
-        qty: safeQty,
-        instructions: safeInstructions,
+        medicine_id: med.id,
+        name: med.name,
+        strength: med.strength || null,
+        form: med.form || null,
+        qty: q,
+        instructions: instr || "Take as directed",
       },
     ]);
 
+    // Reset line fields
     setSelectedMedicineId("");
     setQty(1);
     setInstructions("Take as directed");
   }
 
   function removeLine(index) {
-    setItems((prev) => prev.filter((_, i) => i !== index));
+    setLines((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function saveDraft() {
-    setSaveError(null);
+    setError(null);
 
-    if (!userId) {
-      setSaveError("No auth session. Please login again.");
+    const pName = String(patientName || "").trim();
+    const pId = String(patientId || "").trim();
+
+    if (!pName || !pId) {
+      setError("Patient name and patient ID are required.");
       return;
     }
-    if (!patientName.trim()) {
-      setSaveError("Patient name is required.");
-      return;
-    }
-    if (items.length === 0) {
-      setSaveError("Add at least one medicine line before saving.");
+
+    if (lines.length === 0) {
+      setError("Add at least one medicine line.");
       return;
     }
 
     setSaving(true);
 
     try {
-      // 1) insert prescription
-      const { data: rx, error: rxErr } = await supabase
+      // 1) Ensure logged in doctor exists
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      console.log("AUTH USER:", user);
+      if (authError) console.log("AUTH ERROR:", authError);
+
+      if (authError || !user) {
+        throw new Error("You must be logged in as a doctor to create a prescription.");
+      }
+
+      // 2) Create prescription (Draft)
+      // ✅ FIX: status must be lowercase "draft" (use STATUS.DRAFT)
+      const payload = {
+        patient_name: pName,
+        patient_id: pId,
+
+        // Required by your schema:
+        doctor_user_id: user.id,
+
+        // If your schema ALSO requires patient_user_id, you must supply it
+        // patient_user_id: somePatientUserId,
+
+        status: STATUS.DRAFT, // ✅ "draft"
+      };
+
+      console.log("PRESCRIPTION INSERT PAYLOAD:", payload);
+
+      const { data: prescription, error: insertError } = await supabase
         .from("prescriptions")
-        .insert({
-          patient_name: patientName.trim(),
-          patient_id: (patientId || "").trim() || null,
-          status: "draft",
-          doctor_id: userId, // must exist in table + RLS policy must allow it
-        })
-        .select("id")
+        .insert([payload]) // ✅ array form is safest
+        .select("id,status,created_at,doctor_user_id,patient_id,patient_name")
         .single();
 
-      if (rxErr) throw new Error(rxErr.message || "Failed to create prescription draft");
+      console.log("PRESCRIPTION INSERT DATA:", prescription);
+      console.log("PRESCRIPTION INSERT ERROR:", insertError);
 
-      const prescriptionId = rx?.id;
-      if (!prescriptionId) throw new Error("No prescription id returned from Supabase.");
+      if (insertError) throw insertError;
+      if (!prescription?.id) throw new Error("Prescription insert succeeded but no id returned.");
 
-      // 2) insert items
-      const payload = items.map((it) => ({
-        prescription_id: prescriptionId,
-        medicine_id: it.medicine_id,
-        qty: it.qty,
-        instructions: it.instructions,
+      // 3) Create prescription items
+      const itemsPayload = lines.map((l) => ({
+        prescription_id: prescription.id,
+        medicine_id: l.medicine_id,
+        name: l.name,
+        strength: l.strength,
+        form: l.form,
+        qty: l.qty,
+        instructions: l.instructions,
       }));
 
-      const { error: itemsErr } = await supabase.from("prescription_items").insert(payload);
-      if (itemsErr) throw new Error(itemsErr.message || "Failed to save prescription items");
+      console.log("ITEMS INSERT PAYLOAD:", itemsPayload);
 
-      // reset + navigate
-      setItems([]);
-      setPatientName("");
-      setPatientId("");
+      const { error: itemsError } = await supabase
+        .from("prescription_items")
+        .insert(itemsPayload);
+
+      console.log("ITEMS INSERT ERROR:", itemsError);
+      if (itemsError) throw itemsError;
+
+      // Success
       navigate("/doctor");
     } catch (e) {
-      setSaveError(e?.message || "Failed to save draft.");
+      console.error("SAVE DRAFT ERROR:", e);
+
+      const msg = String(e?.message || "");
+      if (msg.toLowerCase().includes("row-level security")) {
+        setError(
+          "Blocked by Supabase RLS policy. You must allow doctors to insert into prescriptions/prescription_items (or temporarily allow authenticated users during dev)."
+        );
+      } else {
+        setError(e?.message || "Failed to save prescription.");
+      }
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: 24 }}>
-      <div style={{ marginBottom: 16 }}>
-        <Link to="/doctor" style={{ textDecoration: "none" }}>
-          ← Back to Doctor Dashboard
-        </Link>
-      </div>
+    <div style={page}>
+      <Link to="/doctor" style={backLink}>
+        ← Back to Doctor Dashboard
+      </Link>
 
-      <h1 style={{ marginBottom: 8 }}>New Prescription</h1>
+      <h1 style={h1}>New Prescription</h1>
 
-      {authError && (
-        <div style={{ marginTop: 12, marginBottom: 12, color: "#ff8a8a" }}>
-          <b>Auth:</b> {authError}{" "}
-          <button type="button" onClick={() => navigate("/login")} style={{ marginLeft: 8 }}>
-            Go to login
-          </button>
-        </div>
-      )}
+      {error ? <div style={err}>{error}</div> : null}
 
       {/* Patient */}
-      <section
-        style={{
-          padding: 16,
-          border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 12,
-          marginTop: 16,
-        }}
-      >
-        <h3 style={{ marginTop: 0 }}>Patient</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <input value={patientName} onChange={(e) => setPatientName(e.target.value)} placeholder="Patient name" />
-          <input value={patientId} onChange={(e) => setPatientId(e.target.value)} placeholder="Patient ID" />
-        </div>
+      <section style={card}>
+        <h2 style={title}>Patient</h2>
+        <input
+          style={input}
+          placeholder="Patient name"
+          value={patientName}
+          onChange={(e) => setPatientName(e.target.value)}
+        />
+        <input
+          style={input}
+          placeholder="Patient ID"
+          value={patientId}
+          onChange={(e) => setPatientId(e.target.value)}
+        />
       </section>
 
       {/* Add medicine */}
-      <section
-        style={{
-          padding: 16,
-          border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 12,
-          marginTop: 16,
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ marginTop: 0 }}>Add medicine</h3>
-          <div style={{ opacity: 0.8 }}>{loadingMeds ? "Loading…" : `${meds.length} loaded`}</div>
+      <section style={card}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            gap: 12,
+          }}
+        >
+          <h2 style={title}>Add medicine</h2>
+          <button type="button" onClick={loadMedicines} style={ghostBtn}>
+            Refresh catalog
+          </button>
         </div>
 
-        {medError && (
-          <div style={{ marginBottom: 12, color: "#ff8a8a" }}>
-            <b>Inventory load error:</b> {medError}
-          </div>
-        )}
+        {medError ? <div style={{ ...err, marginTop: 8 }}>{medError}</div> : null}
 
-        <label>
-          Select medicine
-          <select
-            value={selectedMedicineId}
-            onChange={(e) => setSelectedMedicineId(e.target.value)}
-            disabled={loadingMeds || meds.length === 0}
-            style={{ display: "block", width: "100%", marginTop: 6 }}
-          >
-            <option value="">— Choose —</option>
-            {meds.map((m) => (
-              <option key={m.id} value={String(m.id)}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <select
+          style={input}
+          value={selectedMedicineId}
+          onChange={(e) => setSelectedMedicineId(e.target.value)}
+          disabled={loadingMeds || medicines.length === 0}
+        >
+          <option value="">
+            {loadingMeds
+              ? "Loading medicines..."
+              : medicines.length === 0
+              ? "No medicines in catalog (Pharmacy must add)"
+              : "— Choose —"}
+          </option>
+          {medicines.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+              {m.strength ? ` · ${m.strength}` : ""}
+              {m.form ? ` · ${m.form}` : ""}
+            </option>
+          ))}
+        </select>
 
-        <div style={{ display: "grid", gridTemplateColumns: "160px 1fr 180px", gap: 12, alignItems: "end", marginTop: 12 }}>
-          <label>
-            Qty
-            <input type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} style={{ display: "block", width: "100%", marginTop: 6 }} />
-          </label>
+        <input
+          style={input}
+          type="number"
+          min={1}
+          value={qty}
+          onChange={(e) => setQty(e.target.value)}
+          placeholder="Qty"
+        />
 
-          <label>
-            Instructions
-            <input value={instructions} onChange={(e) => setInstructions(e.target.value)} style={{ display: "block", width: "100%", marginTop: 6 }} />
-          </label>
+        <input
+          style={input}
+          value={instructions}
+          onChange={(e) => setInstructions(e.target.value)}
+          placeholder="Instructions"
+        />
 
-          <button type="button" onClick={addLine} disabled={!selectedMedicineId || !selectedMed} style={{ height: 40 }}>
-            Add line
-          </button>
+        <button onClick={addLine} style={btn} disabled={loadingMeds || medicines.length === 0}>
+          Add line
+        </button>
+
+        <div style={{ marginTop: 10, fontSize: 12, color: "rgba(148,163,184,0.9)" }}>
+          Rule: Doctors can only prescribe from the Pharmacy catalog. No free-text medicines.
         </div>
       </section>
 
       {/* Lines */}
-      <section
-        style={{
-          padding: 16,
-          border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 12,
-          marginTop: 16,
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ marginTop: 0 }}>Lines</h3>
-          <div style={{ opacity: 0.8 }}>{items.length} items</div>
-        </div>
+      <section style={card}>
+        <h2 style={title}>Lines</h2>
 
-        {items.length === 0 ? (
-          <p style={{ opacity: 0.8 }}>No lines yet.</p>
+        {lines.length === 0 ? (
+          <div style={{ color: "rgba(148,163,184,0.9)" }}>No medicines added yet.</div>
         ) : (
-          <div style={{ display: "grid", gap: 10 }}>
-            {items.map((it, idx) => (
-              <div
-                key={`${it.medicine_id}-${idx}`}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 90px 1fr 100px",
-                  gap: 10,
-                  padding: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  borderRadius: 10,
-                  alignItems: "center",
-                }}
-              >
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {lines.map((l, i) => (
+              <div key={`${l.medicine_id}-${i}`} style={line}>
                 <div>
-                  <b>{it.medicine_name}</b>
-                  <div style={{ opacity: 0.8, fontSize: 12 }}>ID: {String(it.medicine_id)}</div>
+                  <strong style={{ color: "#e5e7eb" }}>
+                    {l.name}
+                    <span style={{ color: "rgba(148,163,184,0.95)", fontWeight: 600 }}>
+                      {l.strength ? ` · ${l.strength}` : ""}
+                      {l.form ? ` · ${l.form}` : ""}
+                    </span>
+                  </strong>
+                  <div style={{ marginTop: 4, color: "rgba(148,163,184,0.95)", fontSize: 13 }}>
+                    Qty: <strong>{l.qty}</strong>
+                    {" · "}
+                    {l.instructions ? `Instructions: ${l.instructions}` : "No instructions"}
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 12, color: "rgba(148,163,184,0.75)" }}>
+                    medicine_id: <code>{l.medicine_id}</code>
+                  </div>
                 </div>
-                <div>Qty: {it.qty}</div>
-                <div style={{ opacity: 0.9 }}>{it.instructions}</div>
-                <button type="button" onClick={() => removeLine(idx)}>
+
+                <button onClick={() => removeLine(i)} style={removeBtn}>
                   Remove
                 </button>
               </div>
             ))}
           </div>
         )}
-
-        {saveError && (
-          <div style={{ marginTop: 12, color: "#ff8a8a" }}>
-            <b>Save error:</b> {saveError}
-          </div>
-        )}
-
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
-          <button type="button" onClick={saveDraft} disabled={saving || items.length === 0 || !userId}>
-            {saving ? "Saving…" : "Save Draft"}
-          </button>
-        </div>
       </section>
+
+      <button
+        onClick={saveDraft}
+        disabled={saving}
+        style={{ ...btn, marginTop: 18, opacity: saving ? 0.6 : 1 }}
+      >
+        {saving ? "Saving…" : "Save Draft"}
+      </button>
     </div>
   );
 }
+
+/* ---------------- styles ---------------- */
+
+const page = {
+  minHeight: "100vh",
+  padding: "2.5rem",
+  backgroundColor: "#020617",
+};
+
+const backLink = { color: "#93c5fd", textDecoration: "none" };
+
+const h1 = { marginTop: 16, color: "#e5e7eb" };
+
+const card = {
+  marginTop: 16,
+  padding: "1.2rem",
+  borderRadius: "1rem",
+  border: "1px solid rgba(51,65,85,0.95)",
+  backgroundColor: "rgba(15,23,42,0.96)",
+};
+
+const title = {
+  margin: 0,
+  marginBottom: 10,
+  color: "#e5e7eb",
+  fontSize: "1rem",
+};
+
+const input = {
+  display: "block",
+  width: "100%",
+  padding: "0.6rem",
+  marginTop: 8,
+  borderRadius: "0.6rem",
+  border: "1px solid rgba(51,65,85,0.95)",
+  backgroundColor: "rgba(2,6,23,0.9)",
+  color: "#e5e7eb",
+  outline: "none",
+};
+
+const btn = {
+  marginTop: 10,
+  padding: "0.6rem 1rem",
+  borderRadius: "0.7rem",
+  border: "1px solid rgba(148,163,184,0.35)",
+  backgroundColor: "rgba(2,6,23,0.85)",
+  color: "#e5e7eb",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const ghostBtn = {
+  padding: "0.45rem 0.75rem",
+  borderRadius: "0.75rem",
+  border: "1px solid rgba(148,163,184,0.35)",
+  background: "rgba(2,6,23,0.75)",
+  color: "rgba(229,231,235,0.95)",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const line = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+  padding: "0.8rem",
+  borderRadius: "0.8rem",
+  backgroundColor: "rgba(2,6,23,0.85)",
+  border: "1px solid rgba(148,163,184,0.2)",
+};
+
+const removeBtn = {
+  background: "transparent",
+  color: "rgba(248,113,113,0.95)",
+  border: "none",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const err = { color: "rgba(248,113,113,0.95)", marginTop: 12 };

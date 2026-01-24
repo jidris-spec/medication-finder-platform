@@ -1,8 +1,9 @@
 // src/pages/pharmacy/SmartOrderView.jsx
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../../supabaseClient";
 import MedicineList from "./MedicineList.jsx";
 import AddBatchModal from "./AddBatchModal.jsx";
+import { supabase } from "../../lib/supabaseClient";
+
 
 export default function SmartOrderView() {
   const [query, setQuery] = useState("");

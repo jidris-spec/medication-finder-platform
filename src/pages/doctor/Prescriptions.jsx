@@ -1,14 +1,32 @@
 // src/pages/doctor/Prescriptions.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "../../supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
 
 export default function Prescriptions() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
 
+  // ✅ Step 2: show who is logged in (and compare with doctor_user_id in DB)
+  const [authUid, setAuthUid] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+
   useEffect(() => {
+    // Step 2 auth check
+    (async () => {
+      const { data, error } = await supabase.auth.getUser();
+
+      console.log("✅ AUTH USER:", data?.user);
+      console.log("✅ AUTH UID:", data?.user?.id);
+      console.log("✅ AUTH EMAIL:", data?.user?.email);
+      console.log("❌ AUTH ERROR:", error);
+
+      setAuthUid(data?.user?.id || "");
+      setAuthEmail(data?.user?.email || "");
+    })();
+
+    // Load list
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -43,6 +61,9 @@ export default function Prescriptions() {
       )
       .order("created_at", { ascending: false });
 
+    // ✅ Debug: don’t let errors hide behind “0”
+    console.log("LIST ERROR:", error);
+    console.log("LIST COUNT:", data?.length);
     if (error) {
       setErr(error.message);
       setItems([]);
@@ -54,13 +75,22 @@ export default function Prescriptions() {
     setLoading(false);
   }
 
+  // ✅ Normalize DB statuses (lowercase) into UI buckets (Title Case)
   const grouped = useMemo(() => {
     const g = { Draft: [], Sent: [], Fulfilled: [], Rejected: [] };
 
+    const normalize = (st) => String(st || "draft").trim().toLowerCase();
+    const labelFor = (st) => {
+      const s = normalize(st);
+      if (s === "sent") return "Sent";
+      if (s === "fulfilled") return "Fulfilled";
+      if (s === "rejected") return "Rejected";
+      return "Draft";
+    };
+
     for (const p of items) {
-      const s = p.status || "Draft";
-      if (!g[s]) g[s] = [];
-      g[s].push(p);
+      const label = labelFor(p.status);
+      g[label].push(p);
     }
 
     // newest first by last activity
@@ -88,6 +118,11 @@ export default function Prescriptions() {
         <button onClick={load} style={ghostBtn} disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
+      </div>
+
+      {/* ✅ Step 2 visible proof */}
+      <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 10, color: "rgba(148,163,184,0.95)" }}>
+        Logged in: <code>{authEmail || "—"}</code> · UID: <code>{authUid || "—"}</code>
       </div>
 
       <p style={{ marginTop: 0, color: "rgba(148,163,184,0.95)" }}>
@@ -166,7 +201,13 @@ function Section({ title, items, empty }) {
 }
 
 function PrescriptionCard({ p }) {
-  const status = p.status || "Draft";
+  const status = (() => {
+    const s = String(p.status || "draft").trim().toLowerCase();
+    if (s === "sent") return "Sent";
+    if (s === "fulfilled") return "Fulfilled";
+    if (s === "rejected") return "Rejected";
+    return "Draft";
+  })();
 
   const rejectionText = p.rejection_reason ?? "";
   const lastLabel = p.pharmacy_at ? "Pharmacy:" : p.sent_at ? "Sent:" : "Created:";

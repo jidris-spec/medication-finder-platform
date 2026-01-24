@@ -1,129 +1,198 @@
 // src/pages/Login.jsx
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { supabase } from "../supabaseClient";
+import { useNavigate, useLocation } from "react-router-dom";
+import { supabase } from "../lib/supabaseClient";
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
 
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState("pharmacy@test.com");
   const [password, setPassword] = useState("");
 
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
 
-  // If already logged in, redirect immediately based on role
+  const isValidEmail = (v) => /^\S+@\S+\.\S+$/.test(String(v || "").trim());
+
+  // ✅ OPTIONAL: run auth health check once on page load (for debugging)
   useEffect(() => {
-    let cancelled = false;
+    (async () => {
+      try {
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-    async function redirectIfLoggedIn() {
-      const { data } = await supabase.auth.getSession();
-      if (cancelled) return;
+        if (!supabaseUrl || !anonKey) {
+          console.warn("Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY");
+          return;
+        }
 
-      if (data?.session?.user?.id) {
-        await redirectByRole(data.session.user.id);
+        const healthRes = await fetch(`${supabaseUrl}/auth/v1/health`, {
+          method: "GET",
+          headers: {
+            apikey: anonKey,
+            Authorization: `Bearer ${anonKey}`,
+          },
+        });
+
+        console.log("AUTH HEALTH STATUS:", healthRes.status);
+      } catch (e) {
+        console.log("AUTH HEALTH CHECK ERROR:", e);
       }
+    })();
+  }, []);
+
+  async function checkAuthHealth() {
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !anonKey) {
+      throw new Error("Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY");
     }
 
-    async function redirectByRole(uid) {
-      const { data: profile, error: pErr } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", uid)
-        .single();
+    const res = await fetch(`${supabaseUrl}/auth/v1/health`, {
+      method: "GET",
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+      },
+    });
 
-      if (pErr || !profile?.role) {
-        setError(pErr?.message || "No role found for this user.");
-        return;
-      }
+    console.log("AUTH HEALTH STATUS:", res.status);
 
-      const role = profile.role; // doctor | pharmacy | patient
-      if (role === "doctor") navigate("/doctor");
-      else if (role === "pharmacy") navigate("/pharmacy");
-      else if (role === "patient") navigate("/patient");
-      else setError(`Unknown role: ${role}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        `Supabase auth health failed (${res.status})${text ? `: ${text}` : ""}`
+      );
     }
+  }
 
-    redirectIfLoggedIn();
-    return () => {
-      cancelled = true;
-    };
-  }, [navigate]);
+  async function fetchRoleByUserId(userId) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    const role = String(data?.role || "").trim().toLowerCase();
+    return role || null;
+  }
+
+  function routeByRole(role) {
+    const from = location.state?.from?.pathname;
+
+    // if user was redirected to login by a guard, send them back
+    if (from) return navigate(from, { replace: true });
+
+    if (role === "pharmacy") return navigate("/pharmacy", { replace: true });
+    if (role === "doctor") return navigate("/doctor", { replace: true });
+    if (role === "patient") return navigate("/patient", { replace: true });
+
+    return navigate("/", { replace: true });
+  }
 
   async function onSubmit(e) {
     e.preventDefault();
-    setError(null);
+    setError("");
+
+    const cleanEmail = email.trim();
+
+    if (!isValidEmail(cleanEmail)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    if (!password) {
+      setError("Password is required.");
+      return;
+    }
+
     setLoading(true);
 
-    const { data, error: signInErr } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
+    try {
+      // (optional) health check per submit
+      setChecking(true);
+      await checkAuthHealth();
+      setChecking(false);
 
-    setLoading(false);
+      const { data, error: signInError } =
+        await supabase.auth.signInWithPassword({
+          email: cleanEmail,
+          password,
+        });
 
-    if (signInErr) {
-      setError(signInErr.message);
-      return;
+      console.log("LOGIN ERROR:", signInError);
+      console.log("LOGIN SESSION:", data?.session);
+      console.log("LOGIN USER:", data?.user);
+
+      if (signInError) {
+        const msg =
+          signInError.status === 400
+            ? "Invalid email or password."
+            : signInError.message || "Login failed.";
+        throw new Error(msg);
+      }
+
+      if (!data?.session) {
+        throw new Error(
+          "No session returned. Check email/password and Supabase Auth settings."
+        );
+      }
+
+      const userId = data?.user?.id;
+      if (!userId) throw new Error("No user returned from Supabase.");
+
+      const role = await fetchRoleByUserId(userId);
+      if (!role) throw new Error("No role found for this user in profiles.");
+
+      routeByRole(role);
+    } catch (err) {
+      console.error("LOGIN ERROR:", err);
+      setError(err?.message || "Login failed");
+    } finally {
+      setChecking(false);
+      setLoading(false);
     }
-
-    const uid = data?.user?.id || data?.session?.user?.id;
-    if (!uid) {
-      setError("Login succeeded but no user id returned.");
-      return;
-    }
-
-    // fetch role and redirect
-    const { data: profile, error: pErr } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", uid)
-      .single();
-
-    if (pErr || !profile?.role) {
-      setError(pErr?.message || "No role found for this user.");
-      return;
-    }
-
-    const role = profile.role;
-    if (role === "doctor") navigate("/doctor");
-    else if (role === "pharmacy") navigate("/pharmacy");
-    else if (role === "patient") navigate("/patient");
-    else setError(`Unknown role: ${role}`);
   }
 
+  const disabled = loading || checking;
+
   return (
-    <div style={{ maxWidth: 420, margin: "60px auto", padding: 24 }}>
+    <div style={{ padding: 24, maxWidth: 420 }}>
       <h1>Login</h1>
 
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}>
-        <label>
-          Email
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            style={{ display: "block", width: "100%", marginTop: 6 }}
-            autoComplete="email"
-          />
-        </label>
+      {error && (
+        <div style={{ color: "tomato", marginBottom: 12 }}>{error}</div>
+      )}
 
-        <label>
-          Password
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={{ display: "block", width: "100%", marginTop: 6 }}
-            autoComplete="current-password"
-          />
-        </label>
+      <form onSubmit={onSubmit} style={{ display: "grid", gap: 10 }}>
+        <input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Email"
+          autoComplete="email"
+        />
 
-        {error && <div style={{ color: "#ff8a8a" }}>{error}</div>}
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Password"
+          autoComplete="current-password"
+        />
 
-        <button type="submit" disabled={loading}>
-          {loading ? "Logging in…" : "Login"}
+        <button type="submit" disabled={disabled}>
+          {checking ? "Checking auth…" : loading ? "Signing in…" : "Login"}
         </button>
       </form>
+
+      <div style={{ opacity: 0.7, marginTop: 12, fontSize: 12 }}>
+        If login succeeds but you don’t route, your <code>profiles</code> row is
+        missing/wrong for that user id.
+      </div>
     </div>
   );
 }
