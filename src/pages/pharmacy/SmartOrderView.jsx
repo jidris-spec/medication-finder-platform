@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import MedicineList from "./MedicineList.jsx";
 import AddBatchModal from "./AddBatchModal.jsx";
-import { supabase } from "../../lib/supabaseClient";
+import { supabase } from "../../lib/supabaseClient.js";
 
 
 export default function SmartOrderView() {
